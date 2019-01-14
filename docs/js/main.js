@@ -1,5 +1,4 @@
 window.onload = function () {
-
   'use strict';
 
   var Viewer = window.Viewer;
@@ -30,9 +29,15 @@ window.onload = function () {
     },
     viewed: function (e) {
       console.log(e.type);
+    },
+    zoom: function (e) {
+      console.log(e.type);
+    },
+    zoomed: function (e) {
+      console.log(e.type);
     }
   };
-  var viewer;
+  var viewer = new Viewer(pictures, options);
 
   function toggleButtons(mode) {
     var targets;
@@ -62,29 +67,6 @@ window.onload = function () {
     }
   }
 
-  addEventListener(pictures, 'ready', function (e) {
-    console.log(e.type);
-  });
-  addEventListener(pictures, 'show', function (e) {
-    console.log(e.type);
-  });
-  addEventListener(pictures, 'shown', function (e) {
-    console.log(e.type);
-  });
-  addEventListener(pictures, 'hide', function (e) {
-    console.log(e.type);
-  });
-  addEventListener(pictures, 'hidden', function (e) {
-    console.log(e.type);
-  });
-  addEventListener(pictures, 'view', function (e) {
-    console.log(e.type);
-  });
-  addEventListener(pictures, 'viewed', function (e) {
-    console.log(e.type);
-  });
-  viewer = new Viewer(pictures, options);
-
   toggleButtons(options.inline ? 'inline' : 'modal');
 
   toggles.onchange = function (event) {
@@ -110,7 +92,7 @@ window.onload = function () {
 
     if (viewer && method) {
       if (target) {
-        viewer[method](target.value);
+        viewer[method](document.querySelector(target).value);
       } else {
         viewer[method](args[0], args[1]);
       }

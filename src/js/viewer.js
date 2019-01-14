@@ -13,28 +13,28 @@ import {
   CLASS_FULLSCREEN,
   CLASS_HIDE,
   CLASS_INVISIBLE,
+  DATA_ACTION,
   EVENT_CLICK,
   EVENT_LOAD,
   EVENT_READY,
   NAMESPACE,
+  REGEXP_SPACES,
   WINDOW,
 } from './constants';
 import {
   addClass,
   addListener,
+  assign,
   dispatchEvent,
-  each,
-  extend,
-  getData,
+  forEach,
   getResponsiveClass,
-  getStyle,
   hyphenate,
   isFunction,
   isNumber,
   isPlainObject,
   isString,
   isUndefined,
-  proxy,
+  removeListener,
   setData,
   setStyle,
   toggleClass,
@@ -54,42 +54,46 @@ class Viewer {
     }
 
     this.element = element;
-    this.options = extend({}, DEFAULTS, isPlainObject(options) && options);
-    this.isImg = false;
-    this.ready = false;
-    this.visible = false;
-    this.viewed = false;
-    this.fulled = false;
-    this.played = false;
-    this.wheeling = false;
-    this.playing = false;
-    this.fading = false;
-    this.tooltiping = false;
-    this.transitioning = false;
+    this.options = assign({}, DEFAULTS, isPlainObject(options) && options);
     this.action = false;
-    this.target = false;
-    this.timeout = false;
-    this.index = 0;
+    this.fading = false;
+    this.fulled = false;
+    this.hiding = false;
+    this.imageClicked = false;
+    this.imageData = {};
+    this.index = this.options.initialViewIndex;
+    this.isImg = false;
+    this.isShown = false;
     this.length = 0;
+    this.played = false;
+    this.playing = false;
     this.pointers = {};
+    this.ready = false;
+    this.showing = false;
+    this.timeout = false;
+    this.tooltipping = false;
+    this.viewed = false;
+    this.viewing = false;
+    this.wheeling = false;
+    this.zooming = false;
     this.init();
   }
 
   init() {
     const { element, options } = this;
 
-    if (getData(element, NAMESPACE)) {
+    if (element[NAMESPACE]) {
       return;
     }
 
-    setData(element, NAMESPACE, this);
+    element[NAMESPACE] = this;
 
     const isImg = element.tagName.toLowerCase() === 'img';
     const images = [];
 
-    each(isImg ? [element] : element.querySelectorAll('img'), (image) => {
-      if (options.filter) {
-        if (options.filter(image)) {
+    forEach(isImg ? [element] : element.querySelectorAll('img'), (image) => {
+      if (isFunction(options.filter)) {
+        if (options.filter.call(this, image)) {
           images.push(image);
         }
       } else {
@@ -97,44 +101,56 @@ class Viewer {
       }
     });
 
-    const { length } = images;
+    this.isImg = isImg;
+    this.length = images.length;
+    this.images = images;
 
-    if (!length) {
-      return;
-    }
+    const { ownerDocument } = element;
+    const body = ownerDocument.body || ownerDocument.documentElement;
 
-    if (isFunction(options.ready)) {
-      addListener(element, EVENT_READY, options.ready, {
-        once: true,
-      });
-    }
+    this.body = body;
+    this.scrollbarWidth = window.innerWidth - ownerDocument.documentElement.clientWidth;
+    this.initialBodyPaddingRight = window.getComputedStyle(body).paddingRight;
 
     // Override `transition` option if it is not supported
     if (isUndefined(document.createElement(NAMESPACE).style.transition)) {
       options.transition = false;
     }
 
-    this.isImg = isImg;
-    this.length = length;
-    this.count = 0;
-    this.images = images;
-
-    const body = document.body || document.documentElement;
-
-    this.body = body;
-    this.scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
-    this.initialBodyPaddingRight = getStyle(body).paddingRight;
-
     if (options.inline) {
-      const progress = proxy(this.progress, this);
+      let count = 0;
+      const progress = () => {
+        count += 1;
 
-      addListener(element, EVENT_READY, () => {
-        this.view();
-      }, {
-        once: true,
-      });
+        if (count === this.length) {
+          let timeout;
 
-      each(images, (image) => {
+          this.initializing = false;
+          this.delaying = {
+            abort: () => {
+              clearTimeout(timeout);
+            },
+          };
+
+          // build asynchronously to keep `this.viewer` is accessible in `ready` event handler.
+          timeout = setTimeout(() => {
+            this.delaying = false;
+            this.build();
+          }, 0);
+        }
+      };
+
+      this.initializing = {
+        abort() {
+          forEach(images, (image) => {
+            if (!image.complete) {
+              removeListener(image, EVENT_LOAD, progress);
+            }
+          });
+        },
+      };
+
+      forEach(images, (image) => {
         if (image.complete) {
           progress();
         } else {
@@ -144,26 +160,21 @@ class Viewer {
         }
       });
     } else {
-      addListener(element, EVENT_CLICK, (this.onStart = proxy(this.start, this)));
-    }
-  }
-
-  progress() {
-    this.count += 1;
-
-    if (this.count === this.length) {
-      this.build();
+      addListener(element, EVENT_CLICK, (this.onStart = ({ target }) => {
+        if (target.tagName.toLowerCase() === 'img'
+          && (!isFunction(options.filter) || options.filter.call(this, target))) {
+          this.view(this.images.indexOf(target));
+        }
+      }));
     }
   }
 
   build() {
-    const { options } = this;
-    const { element } = this;
-
     if (this.ready) {
       return;
     }
 
+    const { element, options } = this;
     const parent = element.parentNode;
     const template = document.createElement('div');
 
@@ -188,16 +199,25 @@ class Viewer {
     this.player = viewer.querySelector(`.${NAMESPACE}-player`);
     this.list = viewer.querySelector(`.${NAMESPACE}-list`);
 
-    addClass(title, !options.title ? CLASS_HIDE : getResponsiveClass(options.title));
+    addClass(title, !options.title ? CLASS_HIDE : getResponsiveClass(Array.isArray(options.title)
+      ? options.title[0]
+      : options.title));
     addClass(navbar, !options.navbar ? CLASS_HIDE : getResponsiveClass(options.navbar));
     toggleClass(button, CLASS_HIDE, !options.button);
 
     if (options.backdrop) {
       addClass(viewer, `${NAMESPACE}-backdrop`);
 
-      if (!options.inline && options.backdrop === true) {
-        setData(canvas, 'action', 'hide');
+      if (!options.inline && options.backdrop !== 'static') {
+        setData(canvas, DATA_ACTION, 'hide');
       }
+    }
+
+    if (isString(options.className) && options.className) {
+      // In case there are multiple class names
+      options.className.split(REGEXP_SPACES).forEach((className) => {
+        addClass(viewer, className);
+      });
     }
 
     if (options.toolbar) {
@@ -211,16 +231,16 @@ class Viewer {
         addClass(toolbar, getResponsiveClass(options.toolbar));
       }
 
-      each(custom ? options.toolbar : BUTTONS, (value, index) => {
+      forEach(custom ? options.toolbar : BUTTONS, (value, index) => {
         const deep = custom && isPlainObject(value);
         const name = custom ? hyphenate(index) : value;
         const show = deep && !isUndefined(value.show) ? value.show : value;
 
         if (
-          !show ||
-          (!options.zoomable && zoomButtons.indexOf(name) !== -1) ||
-          (!options.rotatable && rotateButtons.indexOf(name) !== -1) ||
-          (!options.scalable && scaleButtons.indexOf(name) !== -1)
+          !show
+          || (!options.zoomable && zoomButtons.indexOf(name) !== -1)
+          || (!options.rotatable && rotateButtons.indexOf(name) !== -1)
+          || (!options.scalable && scaleButtons.indexOf(name) !== -1)
         ) {
           return;
         }
@@ -233,7 +253,7 @@ class Viewer {
         addClass(item, `${NAMESPACE}-${name}`);
 
         if (!isFunction(click)) {
-          setData(item, 'action', name);
+          setData(item, DATA_ACTION, name);
         }
 
         if (isNumber(show)) {
@@ -262,7 +282,7 @@ class Viewer {
       const rotates = toolbar.querySelectorAll('li[class*="rotate"]');
 
       addClass(rotates, CLASS_INVISIBLE);
-      each(rotates, (rotate) => {
+      forEach(rotates, (rotate) => {
         toolbar.appendChild(rotate);
       });
     }
@@ -273,7 +293,7 @@ class Viewer {
         zIndex: options.zIndexInline,
       });
 
-      if (getStyle(parent).position === 'static') {
+      if (window.getComputedStyle(parent).position === 'static') {
         setStyle(parent, {
           position: 'relative',
         });
@@ -293,7 +313,7 @@ class Viewer {
       let { container } = options;
 
       if (isString(container)) {
-        container = document.querySelector(container);
+        container = element.ownerDocument.querySelector(container);
       }
 
       if (!container) {
@@ -306,21 +326,25 @@ class Viewer {
     if (options.inline) {
       this.render();
       this.bind();
-      this.visible = true;
+      this.isShown = true;
     }
 
     this.ready = true;
 
-    dispatchEvent(element, EVENT_READY);
-  }
+    if (isFunction(options.ready)) {
+      addListener(element, EVENT_READY, options.ready, {
+        once: true,
+      });
+    }
 
-  unbuild() {
-    if (!this.ready) {
+    if (dispatchEvent(element, EVENT_READY) === false) {
+      this.ready = false;
       return;
     }
 
-    this.ready = false;
-    this.viewer.parentNode.removeChild(this.viewer);
+    if (this.ready && options.inline) {
+      this.view(this.index);
+    }
   }
 
   /**
@@ -337,10 +361,10 @@ class Viewer {
    * @param {Object} options - The new default options.
    */
   static setDefaults(options) {
-    extend(DEFAULTS, isPlainObject(options) && options);
+    assign(DEFAULTS, isPlainObject(options) && options);
   }
 }
 
-extend(Viewer.prototype, render, events, handlers, methods, others);
+assign(Viewer.prototype, render, events, handlers, methods, others);
 
 export default Viewer;

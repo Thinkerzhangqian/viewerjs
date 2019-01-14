@@ -1,4 +1,5 @@
 import {
+  CLASS_LOADING,
   CLASS_TRANSITION,
   EVENT_LOAD,
   EVENT_TRANSITION_END,
@@ -7,16 +8,15 @@ import {
 import {
   addClass,
   addListener,
-  each,
-  empty,
-  extend,
+  assign,
+  forEach,
   getImageNameFromURL,
   getImageNaturalSizes,
   getTransforms,
   isFunction,
   isString,
-  proxy,
   removeClass,
+  removeListener,
   setData,
   setStyle,
 } from './utilities';
@@ -53,7 +53,7 @@ export default {
       viewerData = this.containerData;
     }
 
-    this.viewerData = extend({}, viewerData);
+    this.viewerData = assign({}, viewerData);
   },
 
   renderViewer() {
@@ -66,7 +66,7 @@ export default {
     const { element, options, list } = this;
     const items = [];
 
-    each(this.images, (image, i) => {
+    forEach(this.images, (image, i) => {
       const { src } = image;
       const alt = image.alt || getImageNameFromURL(src);
       let { url } = options;
@@ -74,33 +74,44 @@ export default {
       if (isString(url)) {
         url = image.getAttribute(url);
       } else if (isFunction(url)) {
-        url = url.call(image, image);
+        url = url.call(this, image);
       }
 
       if (src || url) {
-        items.push('<li>' +
-          '<img' +
-            ` src="${src || url}"` +
-            ' role="button"' +
-            ' data-action="view"' +
-            ` data-index="${i}"` +
-            ` data-original-url="${url || src}"` +
-            ` alt="${alt}"` +
-          '>' +
-        '</li>');
+        items.push('<li>'
+          + '<img'
+            + ` src="${src || url}"`
+            + ' role="button"'
+            + ' data-viewer-action="view"'
+            + ` data-index="${i}"`
+            + ` data-original-url="${url || src}"`
+            + ` alt="${alt}"`
+          + '>'
+        + '</li>');
       }
     });
 
     list.innerHTML = items.join('');
+    this.items = list.getElementsByTagName('li');
+    forEach(this.items, (item) => {
+      const image = item.firstElementChild;
 
-    each(list.getElementsByTagName('img'), (image) => {
       setData(image, 'filled', true);
-      addListener(image, EVENT_LOAD, proxy(this.loadImage, this), {
+
+      if (options.loading) {
+        addClass(item, CLASS_LOADING);
+      }
+
+      addListener(image, EVENT_LOAD, (event) => {
+        if (options.loading) {
+          removeClass(item, CLASS_LOADING);
+        }
+
+        this.loadImage(event);
+      }, {
         once: true,
       });
     });
-
-    this.items = list.getElementsByTagName('li');
 
     if (options.transition) {
       addListener(element, EVENT_VIEWED, () => {
@@ -117,31 +128,43 @@ export default {
     const outerWidth = width + 1; // 1 pixel of `margin-left` width
 
     // Place the active item in the center of the screen
-    setStyle(this.list, {
+    setStyle(this.list, assign({
       width: outerWidth * this.length,
-      marginLeft: ((this.viewerData.width - width) / 2) - (outerWidth * i),
-    });
+    }, getTransforms({
+      translateX: ((this.viewerData.width - width) / 2) - (outerWidth * i),
+    })));
   },
 
   resetList() {
-    empty(this.list);
-    removeClass(this.list, CLASS_TRANSITION);
-    setStyle({
-      marginLeft: 0,
-    });
+    const { list } = this;
+
+    list.innerHTML = '';
+    removeClass(list, CLASS_TRANSITION);
+    setStyle(list, getTransforms({
+      translateX: 0,
+    }));
   },
 
-  initImage(callback) {
+  initImage(done) {
     const { options, image, viewerData } = this;
     const footerHeight = this.footer.offsetHeight;
     const viewerWidth = viewerData.width;
     const viewerHeight = Math.max(viewerData.height - footerHeight, footerHeight);
-    const oldImageData = this.ImageData || {};
+    const oldImageData = this.imageData || {};
+    let sizingImage;
 
-    getImageNaturalSizes(image, (naturalWidth, naturalHeight) => {
+    this.imageInitializing = {
+      abort() {
+        sizingImage.onload = null;
+      },
+    };
+
+    sizingImage = getImageNaturalSizes(image, (naturalWidth, naturalHeight) => {
       const aspectRatio = naturalWidth / naturalHeight;
       let width = viewerWidth;
       let height = viewerHeight;
+
+      this.imageInitializing = false;
 
       if (viewerHeight * aspectRatio > viewerWidth) {
         height = viewerWidth / aspectRatio;
@@ -162,7 +185,7 @@ export default {
         left: (viewerWidth - width) / 2,
         top: (viewerHeight - height) / 2,
       };
-      const initialImageData = extend({}, imageData);
+      const initialImageData = assign({}, imageData);
 
       if (options.rotatable) {
         imageData.rotate = oldImageData.rotate || 0;
@@ -179,38 +202,53 @@ export default {
       this.imageData = imageData;
       this.initialImageData = initialImageData;
 
-      if (isFunction(callback)) {
-        callback();
+      if (done) {
+        done();
       }
     });
   },
 
-  renderImage(callback) {
+  renderImage(done) {
     const { image, imageData } = this;
 
-    setStyle(image, extend({
+    setStyle(image, assign({
       width: imageData.width,
       height: imageData.height,
       marginLeft: imageData.left,
       marginTop: imageData.top,
     }, getTransforms(imageData)));
 
-    if (isFunction(callback)) {
-      if (this.transitioning) {
-        addListener(image, EVENT_TRANSITION_END, callback, {
+    if (done) {
+      if ((this.viewing || this.zooming) && this.options.transition) {
+        const onTransitionEnd = () => {
+          this.imageRendering = false;
+          done();
+        };
+
+        this.imageRendering = {
+          abort() {
+            removeListener(image, EVENT_TRANSITION_END, onTransitionEnd);
+          },
+        };
+
+        addListener(image, EVENT_TRANSITION_END, onTransitionEnd, {
           once: true,
         });
       } else {
-        callback();
+        done();
       }
     }
   },
 
   resetImage() {
-    const { image } = this;
-
     // this.image only defined after viewed
-    if (image) {
+    if (this.viewing || this.viewed) {
+      const { image } = this;
+
+      if (this.viewing) {
+        this.viewing.abort();
+      }
+
       image.parentNode.removeChild(image);
       this.image = null;
     }

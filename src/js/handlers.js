@@ -3,31 +3,43 @@ import {
   ACTION_SWITCH,
   ACTION_ZOOM,
   CLASS_INVISIBLE,
+  CLASS_LOADING,
   CLASS_MOVE,
   CLASS_TRANSITION,
+  DATA_ACTION,
+  EVENT_CLICK,
+  EVENT_DBLCLICK,
   EVENT_LOAD,
   EVENT_VIEWED,
+  IS_TOUCH_DEVICE,
 } from './constants';
 import {
   addClass,
   addListener,
+  assign,
   dispatchEvent,
-  each,
-  extend,
+  forEach,
   getData,
   getImageNaturalSizes,
   getPointer,
-  hasClass,
-  proxy,
+  getTransforms,
+  isFunction,
+  isNumber,
   removeClass,
   setStyle,
   toggleClass,
 } from './utilities';
 
 export default {
-  click({ target }) {
+  click(event) {
+    const { target } = event;
     const { options, imageData } = this;
-    const action = getData(target, 'action');
+    const action = getData(target, DATA_ACTION);
+
+    // Cancel the emulated click when the native click event was triggered.
+    if (IS_TOUCH_DEVICE && event.isTrusted && target === this.canvas) {
+      clearTimeout(this.clickCanvasTimeout);
+    }
 
     switch (action) {
       case 'mix':
@@ -74,7 +86,7 @@ export default {
         break;
 
       case 'play':
-        this.play();
+        this.play(options.fullscreen);
         break;
 
       case 'next':
@@ -104,41 +116,63 @@ export default {
     }
   },
 
+  dblclick(event) {
+    event.preventDefault();
+
+    if (this.viewed && event.target === this.image) {
+      // Cancel the emulated double click when the native dblclick event was triggered.
+      if (IS_TOUCH_DEVICE && event.isTrusted) {
+        clearTimeout(this.doubleClickImageTimeout);
+      }
+
+      this.toggle();
+    }
+  },
+
   load() {
+    if (this.timeout) {
+      clearTimeout(this.timeout);
+      this.timeout = false;
+    }
+
     const {
+      element,
       options,
       image,
       index,
       viewerData,
     } = this;
 
-    if (this.timeout) {
-      clearTimeout(this.timeout);
-      this.timeout = false;
-    }
-
-    if (!image) {
-      return;
-    }
-
     removeClass(image, CLASS_INVISIBLE);
 
+    if (options.loading) {
+      removeClass(this.canvas, CLASS_LOADING);
+    }
+
     image.style.cssText = (
-      'width:0;' +
-      'height:0;' +
-      `margin-left:${viewerData.width / 2}px;` +
-      `margin-top:${viewerData.height / 2}px;` +
-      'max-width:none!important;' +
-      'visibility:visible;'
+      'height:0;'
+      + `margin-left:${viewerData.width / 2}px;`
+      + `margin-top:${viewerData.height / 2}px;`
+      + 'max-width:none!important;'
+      + 'position:absolute;'
+      + 'width:0;'
     );
 
     this.initImage(() => {
-      toggleClass(image, CLASS_TRANSITION, options.transition);
       toggleClass(image, CLASS_MOVE, options.movable);
+      toggleClass(image, CLASS_TRANSITION, options.transition);
 
       this.renderImage(() => {
         this.viewed = true;
-        dispatchEvent(this.element, EVENT_VIEWED, {
+        this.viewing = false;
+
+        if (isFunction(options.viewed)) {
+          addListener(element, EVENT_VIEWED, options.viewed, {
+            once: true,
+          });
+        }
+
+        dispatchEvent(element, EVENT_VIEWED, {
           originalImage: this.images[index],
           index,
           image,
@@ -147,8 +181,8 @@ export default {
     });
   },
 
-  loadImage(e) {
-    const image = e.target;
+  loadImage(event) {
+    const image = event.target;
     const parent = image.parentNode;
     const parentWidth = parent.offsetWidth || 30;
     const parentHeight = parent.offsetHeight || 50;
@@ -171,25 +205,25 @@ export default {
         width = parentHeight * aspectRatio;
       }
 
-      setStyle(image, {
+      setStyle(image, assign({
         width,
         height,
-        marginLeft: (parentWidth - width) / 2,
-        marginTop: (parentHeight - height) / 2,
-      });
+      }, getTransforms({
+        translateX: (parentWidth - width) / 2,
+        translateY: (parentHeight - height) / 2,
+      })));
     });
   },
 
-  keydown(e) {
+  keydown(event) {
     const { options } = this;
-    const key = e.keyCode || e.which || e.charCode;
 
     if (!this.fulled || !options.keyboard) {
       return;
     }
 
-    switch (key) {
-      // (Key: Esc)
+    switch (event.keyCode || event.which || event.charCode) {
+      // Escape
       case 27:
         if (this.played) {
           this.stop();
@@ -203,7 +237,7 @@ export default {
 
         break;
 
-      // (Key: Space)
+      // Space
       case 32:
         if (this.played) {
           this.stop();
@@ -211,43 +245,43 @@ export default {
 
         break;
 
-      // View previous (Key: ←)
+      // ArrowLeft
       case 37:
         this.prev(options.loop);
         break;
 
-      // Zoom in (Key: ↑)
+      // ArrowUp
       case 38:
-
         // Prevent scroll on Firefox
-        e.preventDefault();
+        event.preventDefault();
 
+        // Zoom in
         this.zoom(options.zoomRatio, true);
         break;
 
-      // View next (Key: →)
+      // ArrowRight
       case 39:
         this.next(options.loop);
         break;
 
-      // Zoom out (Key: ↓)
+      // ArrowDown
       case 40:
-
         // Prevent scroll on Firefox
-        e.preventDefault();
+        event.preventDefault();
 
+        // Zoom out
         this.zoom(-options.zoomRatio, true);
         break;
 
-      // Zoom out to initial size (Key: Ctrl + 0)
+      // Ctrl + 0
       case 48:
         // Fall through
 
-      // Zoom in to natural size (Key: Ctrl + 1)
-      // eslint-disable-next-line
+      // Ctrl + 1
+      // eslint-disable-next-line no-fallthrough
       case 49:
-        if (e.ctrlKey || e.shiftKey) {
-          e.preventDefault();
+        if (event.ctrlKey) {
+          event.preventDefault();
           this.toggle();
         }
 
@@ -257,90 +291,149 @@ export default {
     }
   },
 
-  dragstart(e) {
-    if (e.target.tagName.toLowerCase() === 'img') {
-      e.preventDefault();
+  dragstart(event) {
+    if (event.target.tagName.toLowerCase() === 'img') {
+      event.preventDefault();
     }
   },
 
-  pointerdown(e) {
+  pointerdown(event) {
     const { options, pointers } = this;
+    const { buttons, button } = event;
 
-    if (!this.viewed || this.transitioning) {
+    if (
+      !this.viewed
+      || this.showing
+      || this.viewing
+      || this.hiding
+
+      // No primary button (usually the left button)
+      // Note: Touch events does not contain `buttons` and `button` properties
+      || (isNumber(buttons) && buttons > 1)
+      || (isNumber(button) && button > 0)
+
+      // Open context menu
+      || event.ctrlKey
+    ) {
       return;
     }
 
-    if (e.changedTouches) {
-      each(e.changedTouches, (touch) => {
+    // Prevent default behaviours as page zooming in touch devices.
+    event.preventDefault();
+
+    if (event.changedTouches) {
+      forEach(event.changedTouches, (touch) => {
         pointers[touch.identifier] = getPointer(touch);
       });
     } else {
-      pointers[e.pointerId || 0] = getPointer(e);
+      pointers[event.pointerId || 0] = getPointer(event);
     }
 
     let action = options.movable ? ACTION_MOVE : false;
 
     if (Object.keys(pointers).length > 1) {
       action = ACTION_ZOOM;
-    } else if ((e.pointerType === 'touch' || e.type === 'touchstart') && this.isSwitchable()) {
+    } else if ((event.pointerType === 'touch' || event.type === 'touchstart') && this.isSwitchable()) {
       action = ACTION_SWITCH;
+    }
+
+    if (options.transition && (action === ACTION_MOVE || action === ACTION_ZOOM)) {
+      removeClass(this.image, CLASS_TRANSITION);
     }
 
     this.action = action;
   },
 
-  pointermove(e) {
-    const {
-      options,
-      pointers,
-      action,
-      image,
-    } = this;
+  pointermove(event) {
+    const { pointers, action } = this;
 
     if (!this.viewed || !action) {
       return;
     }
 
-    e.preventDefault();
+    event.preventDefault();
 
-    if (e.changedTouches) {
-      each(e.changedTouches, (touch) => {
-        extend(pointers[touch.identifier], getPointer(touch, true));
+    if (event.changedTouches) {
+      forEach(event.changedTouches, (touch) => {
+        assign(pointers[touch.identifier] || {}, getPointer(touch, true));
       });
     } else {
-      extend(pointers[e.pointerId || 0], getPointer(e, true));
+      assign(pointers[event.pointerId || 0] || {}, getPointer(event, true));
     }
 
-    if (action === ACTION_MOVE && options.transition && hasClass(image, CLASS_TRANSITION)) {
-      removeClass(image, CLASS_TRANSITION);
-    }
-
-    this.change(e);
+    this.change(event);
   },
 
-  pointerup(e) {
-    const { action, pointers } = this;
+  pointerup(event) {
+    const { options, action, pointers } = this;
+    let pointer;
 
-    if (e.changedTouches) {
-      each(e.changedTouches, (touch) => {
+    if (event.changedTouches) {
+      forEach(event.changedTouches, (touch) => {
+        pointer = pointers[touch.identifier];
         delete pointers[touch.identifier];
       });
     } else {
-      delete pointers[e.pointerId || 0];
+      pointer = pointers[event.pointerId || 0];
+      delete pointers[event.pointerId || 0];
     }
 
     if (!action) {
       return;
     }
 
-    if (action === ACTION_MOVE && this.options.transition) {
+    event.preventDefault();
+
+    if (options.transition && (action === ACTION_MOVE || action === ACTION_ZOOM)) {
       addClass(this.image, CLASS_TRANSITION);
     }
 
     this.action = false;
+
+    // Emulate click and double click in touch devices to support backdrop and image zooming (#210).
+    if (
+      IS_TOUCH_DEVICE
+      && action !== ACTION_ZOOM
+      && pointer
+      && (Date.now() - pointer.timeStamp < 500)
+    ) {
+      clearTimeout(this.clickCanvasTimeout);
+      clearTimeout(this.doubleClickImageTimeout);
+
+      if (options.toggleOnDblclick && this.viewed && event.target === this.image) {
+        if (this.imageClicked) {
+          this.imageClicked = false;
+
+          // This timeout will be cleared later when a native dblclick event is triggering
+          this.doubleClickImageTimeout = setTimeout(() => {
+            dispatchEvent(this.image, EVENT_DBLCLICK);
+          }, 50);
+        } else {
+          this.imageClicked = true;
+
+          // The default timing of a double click in Windows is 500 ms
+          this.doubleClickImageTimeout = setTimeout(() => {
+            this.imageClicked = false;
+          }, 500);
+        }
+      } else {
+        this.imageClicked = false;
+
+        if (options.backdrop && options.backdrop !== 'static' && event.target === this.canvas) {
+          // This timeout will be cleared later when a native click event is triggering
+          this.clickCanvasTimeout = setTimeout(() => {
+            dispatchEvent(this.canvas, EVENT_CLICK);
+          }, 50);
+        }
+      }
+    }
   },
 
   resize() {
+    if (!this.isShown || this.hiding) {
+      return;
+    }
+
     this.initContainer();
     this.initViewer();
     this.renderViewer();
@@ -353,17 +446,18 @@ export default {
     }
 
     if (this.played) {
-      if (this.options.fullscreen && this.fulled &&
-        !document.fullscreenElement &&
-        !document.mozFullScreenElement &&
-        !document.webkitFullscreenElement &&
-        !document.msFullscreenElement) {
+      if (this.options.fullscreen && this.fulled && !(
+        document.fullscreenElement
+        || document.webkitFullscreenElement
+        || document.mozFullScreenElement
+        || document.msFullscreenElement
+      )) {
         this.stop();
         return;
       }
 
-      each(this.player.getElementsByTagName('img'), (image) => {
-        addListener(image, EVENT_LOAD, proxy(this.loadImage, this), {
+      forEach(this.player.getElementsByTagName('img'), (image) => {
+        addListener(image, EVENT_LOAD, this.loadImage.bind(this), {
           once: true,
         });
         dispatchEvent(image, EVENT_LOAD);
@@ -371,19 +465,12 @@ export default {
     }
   },
 
-  start({ target }) {
-    if (target.tagName.toLowerCase() === 'img' && this.images.indexOf(target) !== -1) {
-      this.target = target;
-      this.show();
-    }
-  },
-
-  wheel(e) {
+  wheel(event) {
     if (!this.viewed) {
       return;
     }
 
-    e.preventDefault();
+    event.preventDefault();
 
     // Limit wheel speed to prevent zoom too fast
     if (this.wheeling) {
@@ -399,14 +486,14 @@ export default {
     const ratio = Number(this.options.zoomRatio) || 0.1;
     let delta = 1;
 
-    if (e.deltaY) {
-      delta = e.deltaY > 0 ? 1 : -1;
-    } else if (e.wheelDelta) {
-      delta = -e.wheelDelta / 120;
-    } else if (e.detail) {
-      delta = e.detail > 0 ? 1 : -1;
+    if (event.deltaY) {
+      delta = event.deltaY > 0 ? 1 : -1;
+    } else if (event.wheelDelta) {
+      delta = -event.wheelDelta / 120;
+    } else if (event.detail) {
+      delta = event.detail > 0 ? 1 : -1;
     }
 
-    this.zoom(-delta * ratio, true, e);
+    this.zoom(-delta * ratio, true, event);
   },
 };
